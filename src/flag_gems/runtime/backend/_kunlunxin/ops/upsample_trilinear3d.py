@@ -31,15 +31,27 @@ _WEIGHT_CACHE = {}
 
 @triton.jit
 def _mm_kernel(
-    a_ptr, b_ptr, c_ptr, M, N, K,
-    sam, sak, sbk, sbn, scm, scn,
-    BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    M,
+    N,
+    K,
+    sam,
+    sak,
+    sbk,
+    sbn,
+    scm,
+    scn,
+    BM: tl.constexpr,
+    BN: tl.constexpr,
+    BK: tl.constexpr,
     USE_INT64: tl.constexpr,
 ):
     # C[M, N] = A[M, K] @ B[K, N], acc in fp32 (A loaded then upcast).
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
-    if USE_INT64:  
+    if USE_INT64:
         pid_m = pid_m.to(tl.int64)
         pid_n = pid_n.to(tl.int64)
     offs_m = pid_m * BM + tl.arange(0, BM)
@@ -51,7 +63,11 @@ def _mm_kernel(
     for k in range(0, tl.cdiv(K, BK)):
         km = offs_k[None, :] < K - k * BK
         a = tl.load(a_ptrs, mask=(offs_m[:, None] < M) & km, other=0.0).to(tl.float32)
-        b = tl.load(b_ptrs, mask=(offs_k[:, None] < K - k * BK) & (offs_n[None, :] < N), other=0.0)
+        b = tl.load(
+            b_ptrs,
+            mask=(offs_k[:, None] < K - k * BK) & (offs_n[None, :] < N),
+            other=0.0,
+        )
         acc += tl.dot(a, b, allow_tf32=False)
         a_ptrs += BK * sak
         b_ptrs += BK * sbk
@@ -61,16 +77,30 @@ def _mm_kernel(
 
 @triton.jit
 def _lbmm_kernel(
-    w_ptr, x_ptr, c_ptr, OUT, K, COLS,
-    swo, swk, sxb, sxk, sxc, scb, sco, scc,
-    BO: tl.constexpr, BC: tl.constexpr, BK: tl.constexpr,
+    w_ptr,
+    x_ptr,
+    c_ptr,
+    OUT,
+    K,
+    COLS,
+    swo,
+    swk,
+    sxb,
+    sxk,
+    sxc,
+    scb,
+    sco,
+    scc,
+    BO: tl.constexpr,
+    BC: tl.constexpr,
+    BK: tl.constexpr,
     USE_INT64: tl.constexpr,
 ):
     # C[b, OUT, COLS] = W[OUT, K] @ X[b, K, COLS], W shared across batch b.
     pid_b = tl.program_id(0)
     pid_o = tl.program_id(1)
     pid_c = tl.program_id(2)
-    if USE_INT64: 
+    if USE_INT64:
         pid_b = pid_b.to(tl.int64)
     offs_o = pid_o * BO + tl.arange(0, BO)
     offs_c = pid_c * BC + tl.arange(0, BC)
@@ -80,8 +110,12 @@ def _lbmm_kernel(
     acc = tl.zeros((BO, BC), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BK)):
         kk = K - k * BK
-        w = tl.load(w_ptrs, mask=(offs_o[:, None] < OUT) & (offs_k[None, :] < kk), other=0.0)
-        x = tl.load(x_ptrs, mask=(offs_k[:, None] < kk) & (offs_c[None, :] < COLS), other=0.0).to(tl.float32)
+        w = tl.load(
+            w_ptrs, mask=(offs_o[:, None] < OUT) & (offs_k[None, :] < kk), other=0.0
+        )
+        x = tl.load(
+            x_ptrs, mask=(offs_k[:, None] < kk) & (offs_c[None, :] < COLS), other=0.0
+        ).to(tl.float32)
         acc += tl.dot(w, x, allow_tf32=False)
         w_ptrs += BK * swk
         x_ptrs += BK * sxk
@@ -91,14 +125,22 @@ def _lbmm_kernel(
 
 @triton.jit
 def _dlerp_kernel(
-    y_ptr, o_ptr, id0_ptr, id1_ptr, w0_ptr, w1_ptr,
-    OD, P, ID, BP: tl.constexpr,
+    y_ptr,
+    o_ptr,
+    id0_ptr,
+    id1_ptr,
+    w0_ptr,
+    w1_ptr,
+    OD,
+    P,
+    ID,
+    BP: tl.constexpr,
     USE_INT64: tl.constexpr,
 ):
     # out[n, od, p] = w0[od]*y[n, id0[od], p] + w1[od]*y[n, id1[od], p]
     pid_nod = tl.program_id(0)
     pid_p = tl.program_id(1)
-    if USE_INT64: 
+    if USE_INT64:
         pid_nod = pid_nod.to(tl.int64)
     n = pid_nod // OD
     od = pid_nod % OD
@@ -135,7 +177,13 @@ def _build_weights(in_sz, out_sz, align_corners, scale, dev):
     rows = torch.arange(out_sz, device=dev)
     w[rows, i0.long()] += 1.0 - t
     w[rows, i1.long()] += t
-    entry = (w, i0.contiguous(), i1.contiguous(), (1.0 - t).contiguous(), t.contiguous())
+    entry = (
+        w,
+        i0.contiguous(),
+        i1.contiguous(),
+        (1.0 - t).contiguous(),
+        t.contiguous(),
+    )
     _WEIGHT_CACHE[key] = entry
     return entry
 
@@ -178,9 +226,21 @@ def upsample_trilinear3d(
         y1 = torch.empty((M1, OW), device=dev, dtype=torch.float32)
         BM, BN, BK = 64, 64, 32
         _mm_kernel[(triton.cdiv(M1, BM), triton.cdiv(OW, BN))](
-            xin, wwt, y1, M1, OW, IW,
-            xin.stride(0), xin.stride(1), wwt.stride(0), wwt.stride(1),
-            y1.stride(0), y1.stride(1), BM=BM, BN=BN, BK=BK,
+            xin,
+            wwt,
+            y1,
+            M1,
+            OW,
+            IW,
+            xin.stride(0),
+            xin.stride(1),
+            wwt.stride(0),
+            wwt.stride(1),
+            y1.stride(0),
+            y1.stride(1),
+            BM=BM,
+            BN=BN,
+            BK=BK,
             USE_INT64=(max(xin.numel(), y1.numel()) > INT32_MAX),
         )
 
@@ -189,11 +249,23 @@ def upsample_trilinear3d(
         y2 = torch.empty((NC * ID, OH, OW), device=dev, dtype=torch.float32)
         BO, BC, BKh = 64, 64, 32
         _lbmm_kernel[(NC * ID, triton.cdiv(OH, BO), triton.cdiv(OW, BC))](
-            wh, y1b, y2, OH, IH, OW,
-            wh.stride(0), wh.stride(1),
-            y1b.stride(0), y1b.stride(1), y1b.stride(2),
-            y2.stride(0), y2.stride(1), y2.stride(2),
-            BO=BO, BC=BC, BK=BKh,
+            wh,
+            y1b,
+            y2,
+            OH,
+            IH,
+            OW,
+            wh.stride(0),
+            wh.stride(1),
+            y1b.stride(0),
+            y1b.stride(1),
+            y1b.stride(2),
+            y2.stride(0),
+            y2.stride(1),
+            y2.stride(2),
+            BO=BO,
+            BC=BC,
+            BK=BKh,
             USE_INT64=(max(y1.numel(), y2.numel()) > INT32_MAX),
         )
 
@@ -202,7 +274,16 @@ def upsample_trilinear3d(
         P = OH * OW
         BP = 1024
         _dlerp_kernel[(NC * OD, triton.cdiv(P, BP))](
-            y2p, out, id0, id1, wd0, wd1, OD, P, ID, BP=BP,
+            y2p,
+            out,
+            id0,
+            id1,
+            wd0,
+            wd1,
+            OD,
+            P,
+            ID,
+            BP=BP,
             USE_INT64=(max(y2.numel(), out.numel()) > INT32_MAX),
         )
 

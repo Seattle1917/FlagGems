@@ -164,9 +164,7 @@ def _tle_lse_row_kernel(
         m = m_new
 
     safe_m = tl.where(m == NEG_INF, 0.0, m)
-    res = tl.where(
-        m == NEG_INF, m, tl.where(m == float("inf"), m, safe_m + tl.log(z))
-    )
+    res = tl.where(m == NEG_INF, m, tl.where(m == float("inf"), m, safe_m + tl.log(z)))
     tl.store(c_ptrs, res.to(OUT_DTYPE))
     tle.gpu.copy(c_lmem, c_desc, [XBLOCK], [row_off])
 

@@ -37,6 +37,7 @@ config_ = CodeGenConfig(
     unroll_num=8,
 )
 
+
 @pointwise_dynamic(promotion_methods=[(0, 1, "DEFAULT")], config=config_)
 @triton.jit
 def hardsigmoid_backward_func(grad_output, self):
@@ -52,6 +53,7 @@ def hardsigmoid_backward_func(grad_output, self):
     result = grad_output_fp32 * in_range * (1.0 / 6.0)
     return result.to(grad_output.dtype)
 
+
 # ---------------------------------------------------------------------------
 # Small-shape (host/launch-bound) path: a raw @triton.jit kernel driven by the
 # flat launcher. On tiny shapes (e.g. [64,64]=4096 elts) the device work is
@@ -63,6 +65,7 @@ def hardsigmoid_backward_func(grad_output, self):
 _SMALL_NUMEL = 65536
 _SMALL_BLOCK = 2048
 _SMALL_NUM_WARPS = 4
+
 
 @triton.jit(
     do_not_specialize=["n_elements"],
@@ -88,8 +91,10 @@ def _hsb_small_kernel(
     r = g * in_range * (1.0 / 6.0)
     tl.store(out_ptr + offset, r.to(out_ptr.dtype.element_ty), mask=mask)
 
+
 _MISS = object()
 _FLAT = _MISS
+
 
 def _flat_launchers():
     """`driver.active.flat_launchers`, resolved once (`driver.active` is a lazy
@@ -98,6 +103,7 @@ def _flat_launchers():
     if _FLAT is _MISS:
         _FLAT = getattr(driver.active, "flat_launchers", None)
     return _FLAT
+
 
 def _small_eligible(grad_output, self):
     n = grad_output.numel()
@@ -109,6 +115,7 @@ def _small_eligible(grad_output, self):
         and self.is_contiguous()
         and grad_output.dtype in (torch.float16, torch.float32, torch.bfloat16)
     )
+
 
 def _hsb_small(grad_output, self):
     out = torch.empty_like(grad_output)
@@ -145,6 +152,7 @@ def _hsb_small(grad_output, self):
     # flat ABI: non-constexpr params in signature order (pointers as data_ptr).
     launch(stream, grad_output.data_ptr(), self.data_ptr(), out.data_ptr(), n)
     return out
+
 
 def hardsigmoid_backward(grad_output, self):
     logger.debug("GEMS_KUNLUNXIN HARDSIGMOID_BACKWARD")
