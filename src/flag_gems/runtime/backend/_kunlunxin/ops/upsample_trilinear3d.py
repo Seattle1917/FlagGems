@@ -34,10 +34,14 @@ def _mm_kernel(
     a_ptr, b_ptr, c_ptr, M, N, K,
     sam, sak, sbk, sbn, scm, scn,
     BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
+    USE_INT64: tl.constexpr,
 ):
     # C[M, N] = A[M, K] @ B[K, N], acc in fp32 (A loaded then upcast).
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
+    if USE_INT64:  
+        pid_m = pid_m.to(tl.int64)
+        pid_n = pid_n.to(tl.int64)
     offs_m = pid_m * BM + tl.arange(0, BM)
     offs_n = pid_n * BN + tl.arange(0, BN)
     offs_k = tl.arange(0, BK)
@@ -60,11 +64,14 @@ def _lbmm_kernel(
     w_ptr, x_ptr, c_ptr, OUT, K, COLS,
     swo, swk, sxb, sxk, sxc, scb, sco, scc,
     BO: tl.constexpr, BC: tl.constexpr, BK: tl.constexpr,
+    USE_INT64: tl.constexpr,
 ):
     # C[b, OUT, COLS] = W[OUT, K] @ X[b, K, COLS], W shared across batch b.
     pid_b = tl.program_id(0)
     pid_o = tl.program_id(1)
     pid_c = tl.program_id(2)
+    if USE_INT64: 
+        pid_b = pid_b.to(tl.int64)
     offs_o = pid_o * BO + tl.arange(0, BO)
     offs_c = pid_c * BC + tl.arange(0, BC)
     offs_k = tl.arange(0, BK)
@@ -86,10 +93,13 @@ def _lbmm_kernel(
 def _dlerp_kernel(
     y_ptr, o_ptr, id0_ptr, id1_ptr, w0_ptr, w1_ptr,
     OD, P, ID, BP: tl.constexpr,
+    USE_INT64: tl.constexpr,
 ):
     # out[n, od, p] = w0[od]*y[n, id0[od], p] + w1[od]*y[n, id1[od], p]
     pid_nod = tl.program_id(0)
     pid_p = tl.program_id(1)
+    if USE_INT64: 
+        pid_nod = pid_nod.to(tl.int64)
     n = pid_nod // OD
     od = pid_nod % OD
     id0 = tl.load(id0_ptr + od)
@@ -156,6 +166,11 @@ def upsample_trilinear3d(
     ww = _build_weights(IW, OW, align_corners, scales_w, dev)[0]
 
     with torch_device_fn.device(dev):
+        # int32 index math is the fast path; promote to int64 only when a
+        # tensor's element count can exceed the int32 range (~2.1e9), which the
+        # per-program `pid * stride` offsets would otherwise silently wrap.
+        INT32_MAX = 2**31 - 1
+
         # W-pass: y1[NC*ID*IH, OW] = x[NC*ID*IH, IW] @ Ww^T[IW, OW]
         xin = self.reshape(NC * ID * IH, IW).contiguous()
         wwt = ww.t().contiguous()
@@ -166,6 +181,7 @@ def upsample_trilinear3d(
             xin, wwt, y1, M1, OW, IW,
             xin.stride(0), xin.stride(1), wwt.stride(0), wwt.stride(1),
             y1.stride(0), y1.stride(1), BM=BM, BN=BN, BK=BK,
+            USE_INT64=(max(xin.numel(), y1.numel()) > INT32_MAX),
         )
 
         # H-pass: y2[NC*ID, OH, OW] = Wh[OH, IH] @ y1[NC*ID, IH, OW]
@@ -178,6 +194,7 @@ def upsample_trilinear3d(
             y1b.stride(0), y1b.stride(1), y1b.stride(2),
             y2.stride(0), y2.stride(1), y2.stride(2),
             BO=BO, BC=BC, BK=BKh,
+            USE_INT64=(max(y1.numel(), y2.numel()) > INT32_MAX),
         )
 
         # D-pass: out[N, C, OD, OH, OW] = lerp over ID of y2[NC, ID, OH*OW]
@@ -186,6 +203,7 @@ def upsample_trilinear3d(
         BP = 1024
         _dlerp_kernel[(NC * OD, triton.cdiv(P, BP))](
             y2p, out, id0, id1, wd0, wd1, OD, P, ID, BP=BP,
+            USE_INT64=(max(y2.numel(), out.numel()) > INT32_MAX),
         )
 
     return out
